@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Livenote</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Livenote</h1>
+          <p id="revisionLabel">Loading note...</p>
+        </div>
+        <div class="actions">
+          <span id="status" class="status">Connecting</span>
+          <button id="refreshButton" type="button">Refresh</button>
+          <button id="saveButton" type="button">Save</button>
+        </div>
+      </header>
+
+      <textarea
+        id="editor"
+        class="editor"
+        spellcheck="true"
+        placeholder="Start writing..."
+      ></textarea>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
