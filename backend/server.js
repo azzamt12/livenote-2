@@ -12,6 +12,43 @@ const NOTE_ID = 1;
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
+function log(message, details = {}) {
+  console.log(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      message,
+      ...details
+    })
+  );
+}
+
+function logError(message, error, details = {}) {
+  console.error(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      message,
+      error: error.message,
+      stack: error.stack,
+      ...details
+    })
+  );
+}
+
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+
+  res.on("finish", () => {
+    log("request completed", {
+      method: req.method,
+      path: req.originalUrl,
+      statusCode: res.statusCode,
+      durationMs: Date.now() - startedAt
+    });
+  });
+
+  next();
+});
+
 const pool = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
   port: Number(process.env.DB_PORT || 3306),
@@ -31,6 +68,11 @@ function sendEvent(res, event, data) {
 }
 
 function broadcastNote(note) {
+  log("broadcasting note update", {
+    revision: note.revision,
+    connectedClients: clients.size
+  });
+
   for (const client of clients) {
     sendEvent(client, "note", note);
   }
@@ -81,6 +123,13 @@ function mergeConcurrentText(baseContent, currentContent, incomingContent) {
 }
 
 async function initializeDatabase() {
+  log("initializing database", {
+    host: process.env.DB_HOST || "localhost",
+    port: Number(process.env.DB_PORT || 3306),
+    database: process.env.DB_NAME || "livenote",
+    user: process.env.DB_USER || "livenote"
+  });
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS notes (
       id INT PRIMARY KEY,
@@ -94,13 +143,23 @@ async function initializeDatabase() {
     "INSERT IGNORE INTO notes (id, content, revision) VALUES (?, ?, ?)",
     [NOTE_ID, "", 1]
   );
+
+  log("database initialized");
 }
 
 async function getNote(connection = pool) {
+  log("fetching note", { noteId: NOTE_ID });
+
   const [rows] = await connection.query(
     "SELECT id, content, revision, updated_at AS updatedAt FROM notes WHERE id = ?",
     [NOTE_ID]
   );
+
+  log("note fetched", {
+    noteId: NOTE_ID,
+    revision: rows[0]?.revision,
+    contentLength: rows[0]?.content?.length ?? 0
+  });
 
   return rows[0];
 }
@@ -125,10 +184,12 @@ app.get("/api/note/events", async (req, res, next) => {
     res.flushHeaders?.();
 
     clients.add(res);
+    log("event client connected", { connectedClients: clients.size });
     sendEvent(res, "note", await getNote());
 
     req.on("close", () => {
       clients.delete(res);
+      log("event client disconnected", { connectedClients: clients.size });
       res.end();
     });
   } catch (error) {
@@ -139,19 +200,29 @@ app.get("/api/note/events", async (req, res, next) => {
 app.put("/api/note", async (req, res, next) => {
   const { content, baseContent = "", baseRevision } = req.body;
 
+  log("save requested", {
+    incomingContentLength: typeof content === "string" ? content.length : null,
+    baseContentLength: typeof baseContent === "string" ? baseContent.length : null,
+    baseRevision: baseRevision ?? null
+  });
+
   if (typeof content !== "string") {
+    log("save rejected", { reason: "content must be a string" });
     res.status(400).json({ error: "content must be a string" });
     return;
   }
 
   if (baseRevision !== undefined && !Number.isInteger(baseRevision)) {
+    log("save rejected", { reason: "baseRevision must be an integer", baseRevision });
     res.status(400).json({ error: "baseRevision must be an integer" });
     return;
   }
 
+  log("acquiring database connection for save");
   const connection = await pool.getConnection();
 
   try {
+    log("save transaction starting");
     await connection.beginTransaction();
 
     const [rows] = await connection.query(
@@ -161,10 +232,23 @@ app.put("/api/note", async (req, res, next) => {
 
     const current = rows[0];
     const shouldMerge = Number.isInteger(baseRevision) && baseRevision < current.revision;
+    log("current note loaded for save", {
+      currentRevision: current.revision,
+      currentContentLength: current.content.length,
+      shouldMerge
+    });
+
     const nextContent = shouldMerge
       ? mergeConcurrentText(baseContent, current.content, content)
       : content;
     const nextRevision = current.revision + 1;
+
+    log("saving note update", {
+      fromRevision: current.revision,
+      toRevision: nextRevision,
+      nextContentLength: nextContent.length,
+      merged: shouldMerge
+    });
 
     await connection.query(
       "UPDATE notes SET content = ?, revision = ? WHERE id = ?",
@@ -172,6 +256,7 @@ app.put("/api/note", async (req, res, next) => {
     );
 
     await connection.commit();
+    log("save transaction committed", { revision: nextRevision });
 
     const note = await getNote();
     broadcastNote(note);
@@ -182,25 +267,30 @@ app.put("/api/note", async (req, res, next) => {
       requestedBaseRevision: baseRevision ?? null
     });
   } catch (error) {
+    logError("save failed, rolling back", error);
     await connection.rollback();
     next(error);
   } finally {
+    log("database connection released after save");
     connection.release();
   }
 });
 
 app.use((error, req, res, next) => {
-  console.error(error);
+  logError("request failed", error, {
+    method: req.method,
+    path: req.originalUrl
+  });
   res.status(500).json({ error: "Internal server error" });
 });
 
 initializeDatabase()
   .then(() => {
     app.listen(PORT, () => {
-      console.log(`Livenote backend listening on port ${PORT}`);
+      log("Livenote backend listening", { port: PORT });
     });
   })
   .catch((error) => {
-    console.error("Failed to initialize database", error);
+    logError("Failed to initialize database", error);
     process.exit(1);
   });
