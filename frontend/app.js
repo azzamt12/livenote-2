@@ -2,7 +2,7 @@ const API_BASE_URL =
   window.LIVENOTE_API_BASE_URL ||
   `${window.location.protocol === "file:" ? "http:" : window.location.protocol}//${
     window.location.hostname || "localhost"
-  }:3000`;
+  }:13000`;
 
 const editor = document.getElementById("editor");
 const saveButton = document.getElementById("saveButton");
