@@ -19,6 +19,8 @@ services:
       DB_USER: livenote
       DB_PASSWORD: livenote
       DB_NAME: livenote
+      DB_ROOT_USER: root
+      DB_ROOT_PASSWORD: root
     depends_on:
       mysql:
         condition: service_healthy

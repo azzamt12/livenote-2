@@ -8,6 +8,13 @@ const app = express();
 
 const PORT = Number(process.env.PORT || 3000);
 const NOTE_ID = 1;
+const DB_HOST = process.env.DB_HOST || "localhost";
+const DB_PORT = Number(process.env.DB_PORT || 3306);
+const DB_USER = process.env.DB_USER || "livenote";
+const DB_PASSWORD = process.env.DB_PASSWORD || "livenote";
+const DB_NAME = process.env.DB_NAME || "livenote";
+const DB_ROOT_USER = process.env.DB_ROOT_USER || "root";
+const DB_ROOT_PASSWORD = process.env.DB_ROOT_PASSWORD || "root";
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -49,16 +56,20 @@ app.use((req, res, next) => {
   next();
 });
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || "livenote",
-  password: process.env.DB_PASSWORD || "livenote",
-  database: process.env.DB_NAME || "livenote",
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
+function createAppPool() {
+  return mysql.createPool({
+    host: DB_HOST,
+    port: DB_PORT,
+    user: DB_USER,
+    password: DB_PASSWORD,
+    database: DB_NAME,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+  });
+}
+
+let pool = createAppPool();
 
 const clients = new Set();
 
@@ -80,6 +91,12 @@ function broadcastNote(note) {
 
 function uniqueLines(lines) {
   return lines.filter((line, index) => lines.indexOf(line) === index);
+}
+
+function assertSafeIdentifier(value, label) {
+  if (!/^[A-Za-z0-9_]+$/.test(value)) {
+    throw new Error(`${label} may only contain letters, numbers, and underscores`);
+  }
 }
 
 function mergeConcurrentText(baseContent, currentContent, incomingContent) {
@@ -122,14 +139,43 @@ function mergeConcurrentText(baseContent, currentContent, incomingContent) {
   return `${currentContent}${separator}${missingLines.join("\n")}`;
 }
 
-async function initializeDatabase() {
-  log("initializing database", {
-    host: process.env.DB_HOST || "localhost",
-    port: Number(process.env.DB_PORT || 3306),
-    database: process.env.DB_NAME || "livenote",
-    user: process.env.DB_USER || "livenote"
+async function bootstrapDatabase() {
+  assertSafeIdentifier(DB_NAME, "DB_NAME");
+
+  log("bootstrapping missing database", {
+    host: DB_HOST,
+    port: DB_PORT,
+    database: DB_NAME,
+    rootUser: DB_ROOT_USER,
+    appUser: DB_USER
   });
 
+  const connection = await mysql.createConnection({
+    host: DB_HOST,
+    port: DB_PORT,
+    user: DB_ROOT_USER,
+    password: DB_ROOT_PASSWORD,
+    database: "mysql"
+  });
+
+  try {
+    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\``);
+    await connection.query(
+      `GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO ?@'%'`,
+      [DB_USER]
+    );
+    await connection.query("FLUSH PRIVILEGES");
+
+    log("missing database bootstrapped", {
+      database: DB_NAME,
+      appUser: DB_USER
+    });
+  } finally {
+    await connection.end();
+  }
+}
+
+async function createNotesTable() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS notes (
       id INT PRIMARY KEY,
@@ -143,6 +189,29 @@ async function initializeDatabase() {
     "INSERT IGNORE INTO notes (id, content, revision) VALUES (?, ?, ?)",
     [NOTE_ID, "", 1]
   );
+}
+
+async function initializeDatabase() {
+  log("initializing database", {
+    host: DB_HOST,
+    port: DB_PORT,
+    database: DB_NAME,
+    user: DB_USER
+  });
+
+  try {
+    await createNotesTable();
+  } catch (error) {
+    if (error.code !== "ER_BAD_DB_ERROR") {
+      throw error;
+    }
+
+    logError("configured database is missing", error, { database: DB_NAME });
+    await pool.end();
+    await bootstrapDatabase();
+    pool = createAppPool();
+    await createNotesTable();
+  }
 
   log("database initialized");
 }
